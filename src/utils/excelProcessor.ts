@@ -39,11 +39,11 @@ export interface CollectionRecord {
   employeeId: string;
   branch: string;
 
-  saleDate: string;     // dd/mm/yyyy
+  saleDate: string; // dd/mm/yyyy
   overdueDays: number | string;
   overdueBucket: OverdueBucket;
 
-  contactDate: string;  // dd/mm/yyyy
+  contactDate: string; // dd/mm/yyyy
   contractNo: string;
   fullName: string;
 
@@ -53,10 +53,10 @@ export interface CollectionRecord {
 
 export interface BucketStat {
   bucket: OverdueBucket;
-  total: number;     // งานที่ได้รับทั้งหมด
-  callPaid: number;  // โทรตามมาจ่าย (CALL_PAID)
-  selfPaid: number;  // มาเอง (SELF_PAID)
-  unpaid: number;    // ไม่มาจ่าย (UNPAID)
+  total: number; // งานที่ได้รับทั้งหมด
+  callPaid: number; // ทำได้ = CALL_PAID
+  selfPaid: number; // มาเอง = SELF_PAID
+  unpaid: number; // ไม่มาจ่าย = UNPAID
 }
 
 export interface EmployeeSummary {
@@ -74,6 +74,7 @@ export interface ProcessingResult {
     selfPaid: number;
     callPaid: number;
     unpaid: number;
+    successRate: number; // ((total - selfPaid) / callPaid) * 100  (ตามสูตรที่คุณให้)
   };
   records: CollectionRecord[];
   employeeSummary: EmployeeSummary[];
@@ -93,6 +94,7 @@ const ALIAS = {
   CONTACT_DATE: ['วันที่ติดต่อ', 'วันติดต่อ'],
   CONTRACT_NO: ['เลขที่สัญญา', 'เลขทีสัญญา', 'เลขสัญญา'],
   FULL_NAME: ['ชื่อ-นามสกุล', 'ชื่อ - สกุล', 'ชื่อสกุล', 'ชื่อ-สกุล'],
+  // ผลการตามอาจอยู่ใต้คอลัมน์ "ผลตาม/ผลการตาม/ลูกค้ามาจ่าย" แล้วค่ามีคำว่า "ลูกค้ามาจ่าย"
   RESULT_TEXT: ['ผลตาม', 'ผลการตาม', 'ผลการติดตาม', 'ลูกค้ามาจ่าย'],
 
   // Export file
@@ -109,10 +111,10 @@ const ALIAS = {
  * Excel / SheetJS may parse them as number => leading zeros are LOST.
  *
  * Fix:
- * 1) use sheet_to_json(... raw:true) to preserve raw cell values
- * 2) normalize to digit string
- * 3) padStart to fixed length if needed (default 14)
- * 4) also keep fallback key without leading zeros in maps
+ * - read with raw: true
+ * - normalize to digit string
+ * - padStart to fixed length (default 14)
+ * - also keep fallback key without leading zeros in exportMap (for matching)
  */
 const CONTRACT_LEN = 14;
 
@@ -122,14 +124,15 @@ const normalizeContract = (value: unknown): string => {
   let s = String(value).trim().replace(/\u200b/g, '');
   s = s.replace(/\s+/g, '');
 
-  // If it's like 12345.0
+  // remove .0, .00...
   s = s.replace(/\.0+$/, '');
 
-  // keep digits only (recommended for contract)
+  // keep digits only
   s = s.replace(/[^\d]/g, '');
 
   if (!s) return '';
 
+  // pad leading zeros to fixed length (if your contract length differs, change CONTRACT_LEN)
   if (s.length < CONTRACT_LEN) s = s.padStart(CONTRACT_LEN, '0');
 
   return s;
@@ -222,14 +225,14 @@ const findHeaderRowAny = (ws: XLSX.WorkSheet, colNames: string[]): number => {
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Build Employee Summary (for "รูป" report)
+// Build Employee Summary (for report)
 // ───────────────────────────────────────────────────────────────────────────────
 
 const buildEmployeeSummary = (records: CollectionRecord[]): EmployeeSummary[] => {
   const empMap = new Map<string, Map<OverdueBucket, BucketStat>>();
 
   for (const rec of records) {
-    const eid = rec.employeeId || '(ไม่ระบุ)';
+    const eid = rec.employeeId || '-';
     if (!empMap.has(eid)) empMap.set(eid, new Map());
     const bmap = empMap.get(eid)!;
 
@@ -325,7 +328,9 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
   }
 
   const records: CollectionRecord[] = [];
-  let selfPaid = 0, callPaid = 0, unpaid = 0;
+  let selfPaid = 0,
+    callPaid = 0,
+    unpaid = 0;
 
   for (const [contractNo, rows] of grouped.entries()) {
     const pick = (keys: string[]) => firstNonEmpty(...rows.map((r) => getByAliases(r, keys)));
@@ -343,20 +348,20 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
     const lookupNoZero = contractKeyNoZero(contractNo);
 
     const totalPaidAmount =
-      exportMap.get(contractNo) ??
-      (lookupNoZero ? exportMap.get(lookupNoZero) : undefined) ??
-      0;
+      exportMap.get(contractNo) ?? (lookupNoZero ? exportMap.get(lookupNoZero) : undefined) ?? 0;
 
-    const isInExport =
-      exportMap.has(contractNo) || (lookupNoZero ? exportMap.has(lookupNoZero) : false);
+    const isInExport = exportMap.has(contractNo) || (lookupNoZero ? exportMap.has(lookupNoZero) : false);
 
     let status: CollectionRecord['status'];
     if (isSelfPaid) {
-      status = 'SELF_PAID'; selfPaid++;
+      status = 'SELF_PAID';
+      selfPaid++;
     } else if (isInExport) {
-      status = 'CALL_PAID'; callPaid++;
+      status = 'CALL_PAID';
+      callPaid++;
     } else {
-      status = 'UNPAID'; unpaid++;
+      status = 'UNPAID';
+      unpaid++;
     }
 
     records.push({
@@ -384,8 +389,12 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
 
   const employeeSummary = buildEmployeeSummary(records);
 
+  const total = records.length;
+  // ✅ ตามสูตรที่คุณระบุ: (ทำได้ / (งานทั้งหมด - มาเอง)) * 100
+  const successRate = callPaid === 0 ? 0 : (callPaid / (total - selfPaid)) * 100;
+
   return {
-    summary: { total: records.length, selfPaid, callPaid, unpaid },
+    summary: { total, selfPaid, callPaid, unpaid, successRate },
     records,
     employeeSummary,
   };
@@ -441,10 +450,7 @@ export const generateOneExcelFile = async (result: ProcessingResult): Promise<vo
   buildDetailedSheet(wsDetail, result);
 
   const buf = await wb.xlsx.writeBuffer();
-  saveAs(
-    new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    'output.xlsx'
-  );
+  saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'output.xlsx');
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -464,10 +470,11 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     gray: 'FFD9D9D9',
     subtotalBg: 'FF92D050',
     grandBg: 'FFE7E6E6',
+    successBg: 'FFDDEBF7',
   };
 
   // Title row
-  const title = ws.addRow(['ผลงานแรงรัดโทร  มกราคม 2569']);
+  const title = ws.addRow(['ผลงานแรงรัดโทร']);
   ws.mergeCells(1, 1, 1, 10);
   title.height = 22;
   title.getCell(1).font = { bold: true, size: 14 };
@@ -529,7 +536,10 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     });
   };
 
-  let gtTotal = 0, gtCall = 0, gtSelf = 0, gtUnpaid = 0;
+  let gtTotal = 0,
+    gtCall = 0,
+    gtSelf = 0,
+    gtUnpaid = 0;
 
   for (const emp of result.employeeSummary) {
     // bucket rows
@@ -586,6 +596,36 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     1,
   ]);
   styleRow(grand, false, true);
+
+  // ✅ Success Rate row (ตามสูตรที่คุณให้)
+  const sr = result.summary.successRate / 100; // excel percent requires fraction
+  const successRow = ws.addRow([
+    'ผลงานความสำเร็จ',
+    '(ทำได้ / (งานทั้งหมด - มาเอง)) * 100',
+    '',
+    '',
+    sr,
+    '',
+    '',
+    '',
+    '',
+    '',
+  ]);
+
+  ws.mergeCells(successRow.number, 1, successRow.number, 4);
+  ws.mergeCells(successRow.number, 6, successRow.number, 10);
+
+  successRow.height = 22;
+  successRow.eachCell((cell, col) => {
+    cell.border = border();
+    cell.fill = fill(C.successBg);
+    cell.font = { ...(cell.font ?? {}), bold: true };
+    cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'center', wrapText: true };
+  });
+
+  successRow.getCell(5).numFmt = '0.00%';
+  successRow.getCell(5).font = { bold: true, color: { argb: 'FF0B5394' }, size: 12 };
+  successRow.getCell(5).alignment = { horizontal: 'center', vertical: 'middle' };
 
   ws.views = [{ state: 'frozen', ySplit: 2 }];
 };
