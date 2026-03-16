@@ -69,6 +69,7 @@ export interface EmployeeSummary {
 }
 
 export interface ProcessingResult {
+  reportTitle: string;
   summary: {
     total: number;
     selfPaid: number;
@@ -112,33 +113,39 @@ const ALIAS = {
  *
  * Fix:
  * - read with raw: true
- * - normalize to digit string
- * - padStart to fixed length (default 14)
+ * - keep a display value for export/UI
+ * - build a normalized key for matching
  * - also keep fallback key without leading zeros in exportMap (for matching)
  */
 const CONTRACT_LEN = 14;
 
-const normalizeContract = (value: unknown): string => {
+const cleanContractDisplay = (value: unknown): string => {
   if (value === null || value === undefined) return '';
 
   let s = String(value).trim().replace(/\u200b/g, '');
   s = s.replace(/\s+/g, '');
-
-  // remove .0, .00...
   s = s.replace(/\.0+$/, '');
+  return s;
+};
 
-  // keep digits only
-  s = s.replace(/[^\d]/g, '');
-
+const normalizeContractKey = (value: unknown): string => {
+  let s = cleanContractDisplay(value).toUpperCase();
   if (!s) return '';
 
-  // pad leading zeros to fixed length (if your contract length differs, change CONTRACT_LEN)
-  if (s.length < CONTRACT_LEN) s = s.padStart(CONTRACT_LEN, '0');
+  s = s.replace(/[^A-Z0-9]/g, '');
+  if (!s) return '';
+
+  if (/^\d+$/.test(s) && s.length < CONTRACT_LEN) {
+    s = s.padStart(CONTRACT_LEN, '0');
+  }
 
   return s;
 };
 
-const contractKeyNoZero = (contract: string) => contract.replace(/^0+/, '');
+const contractKeyNoZero = (contract: string) => {
+  if (!/^\d+$/.test(contract)) return contract;
+  return contract.replace(/^0+/, '');
+};
 
 const parseAmount = (value: unknown): number => {
   if (value === null || value === undefined) return 0;
@@ -199,6 +206,24 @@ const getByAliases = (row: Record<string, unknown>, keys: string[]) => {
     if (k in row) return row[k];
   }
   return undefined;
+};
+
+const cleanTitleCell = (value: unknown): string =>
+  String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const extractEmployeeNameFromTitle = (value: unknown): string => {
+  const text = cleanTitleCell(value);
+  if (!text) return '';
+
+  const collectionMatch = text.match(/รายงานผลการตาม\s+(.+?)\s+เดือน/i);
+  if (collectionMatch?.[1]) return collectionMatch[1].trim();
+
+  const exportMatch = text.match(/^(.*?)\s+สาขา\s*\d+/i);
+  if (exportMatch?.[1]) return exportMatch[1].trim();
+
+  return '';
 };
 
 /**
@@ -277,6 +302,8 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
   // 1) Parse Collection
   const wb1 = XLSX.read(collectionBuffer, { type: 'array' });
   const ws1 = wb1.Sheets[wb1.SheetNames[0]];
+  const collectionTitle = cleanTitleCell(ws1['A1']?.v);
+  const collectionEmployeeName = extractEmployeeNameFromTitle(collectionTitle);
   const hdr1 = findHeaderRowAny(ws1, ALIAS.CONTRACT_NO);
 
   const collectionRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws1, {
@@ -288,6 +315,8 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
   // 2) Parse Export
   const wb2 = XLSX.read(exportBuffer, { type: 'array' });
   const ws2 = wb2.Sheets[wb2.SheetNames[0]];
+  const exportSubtitle = cleanTitleCell(ws2['A2']?.v);
+  const exportEmployeeName = extractEmployeeNameFromTitle(exportSubtitle);
   const hdr2 = findHeaderRowAny(ws2, ALIAS.EXPORT_CONTRACT_NO);
 
   const exportRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws2, {
@@ -310,7 +339,7 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
 
   for (const row of exportRows) {
     const rawContract = getByAliases(row, ALIAS.EXPORT_CONTRACT_NO);
-    const contract = normalizeContract(rawContract);
+    const contract = normalizeContractKey(rawContract);
     if (!contract) continue;
 
     const netReceived = parseAmount(getByAliases(row, ALIAS.NET_RECEIVED));
@@ -318,21 +347,33 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
   }
 
   // 4) Group Collection by contract (1 contract => 1 record)
-  const grouped = new Map<string, Record<string, unknown>[]>();
+  const grouped = new Map<
+    string,
+    { displayContract: string; rows: Record<string, unknown>[] }
+  >();
   for (const row of collectionRows) {
     const rawContract = getByAliases(row, ALIAS.CONTRACT_NO);
-    const contract = normalizeContract(rawContract);
-    if (!contract) continue;
-    if (!grouped.has(contract)) grouped.set(contract, []);
-    grouped.get(contract)!.push(row);
+    const contractKey = normalizeContractKey(rawContract);
+    if (!contractKey) continue;
+    const displayContract = cleanContractDisplay(rawContract);
+
+    if (!grouped.has(contractKey)) {
+      grouped.set(contractKey, { displayContract, rows: [] });
+    }
+
+    const entry = grouped.get(contractKey)!;
+    if (!entry.displayContract && displayContract) entry.displayContract = displayContract;
+    entry.rows.push(row);
   }
 
   const records: CollectionRecord[] = [];
+  const fallbackEmployeeName = collectionEmployeeName || exportEmployeeName;
   let selfPaid = 0,
     callPaid = 0,
     unpaid = 0;
 
-  for (const [contractNo, rows] of grouped.entries()) {
+  for (const [contractKey, entry] of grouped.entries()) {
+    const { displayContract, rows } = entry;
     const pick = (keys: string[]) => firstNonEmpty(...rows.map((r) => getByAliases(r, keys)));
 
     const rawOverdue = pick(ALIAS.OVERDUE_DAYS);
@@ -345,12 +386,12 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
       return v === 'ลูกค้ามาจ่าย' || v.includes('ลูกค้ามาจ่าย');
     });
 
-    const lookupNoZero = contractKeyNoZero(contractNo);
+    const lookupNoZero = contractKeyNoZero(contractKey);
 
     const totalPaidAmount =
-      exportMap.get(contractNo) ?? (lookupNoZero ? exportMap.get(lookupNoZero) : undefined) ?? 0;
+      exportMap.get(contractKey) ?? (lookupNoZero ? exportMap.get(lookupNoZero) : undefined) ?? 0;
 
-    const isInExport = exportMap.has(contractNo) || (lookupNoZero ? exportMap.has(lookupNoZero) : false);
+    const isInExport = exportMap.has(contractKey) || (lookupNoZero ? exportMap.has(lookupNoZero) : false);
 
     let status: CollectionRecord['status'];
     if (isSelfPaid) {
@@ -366,13 +407,13 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
 
     records.push({
       index: pick(ALIAS.INDEX),
-      employeeId: pick(ALIAS.EMPLOYEE_ID),
+      employeeId: pick(ALIAS.EMPLOYEE_ID) || fallbackEmployeeName,
       branch: pick(ALIAS.BRANCH),
       saleDate: formatDate(pick(ALIAS.SALE_DATE)),
       overdueDays,
       overdueBucket: getOverdueBucket(overdueDays),
       contactDate: formatDate(pick(ALIAS.CONTACT_DATE)),
-      contractNo,
+      contractNo: displayContract || contractKey,
       fullName: pick(ALIAS.FULL_NAME),
       totalPaidAmount,
       status,
@@ -394,6 +435,7 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
   const successRate = callPaid === 0 ? 0 : (callPaid / (total - selfPaid)) * 100;
 
   return {
+    reportTitle: collectionTitle || 'สรุปผลงานโทร',
     summary: { total, selfPaid, callPaid, unpaid, successRate },
     records,
     employeeSummary,
@@ -426,14 +468,6 @@ const applyHeaderStyle = (cell: ExcelJS.Cell, fillArgb: ArgbColor, fontColor = '
   cell.border = border();
 };
 
-const applyCellStyle = (cell: ExcelJS.Cell, fillArgb: ArgbColor, fontColor = 'FF000000', numFmt?: string) => {
-  cell.fill = fill(fillArgb);
-  cell.font = { color: { argb: fontColor }, size: 10 };
-  cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  cell.border = border();
-  if (numFmt) cell.numFmt = numFmt;
-};
-
 // ───────────────────────────────────────────────────────────────────────────────
 // Export ONE workbook with 2 sheets (Summary first, Detail second)
 // ───────────────────────────────────────────────────────────────────────────────
@@ -444,13 +478,22 @@ export const generateOneExcelFile = async (result: ProcessingResult): Promise<vo
   wb.created = new Date();
 
   const wsSummary = wb.addWorksheet('สรุปผล');
-  buildSummarySheetLikeImage(wsSummary, result);
+  buildSummarySheetLikeImage(wsSummary, result, false);
+
+  const wsPerformance = wb.addWorksheet('ผลการติดตามความสำเสร็จ');
+  buildSummarySheetLikeImage(wsPerformance, result, true);
 
   const wsDetail = wb.addWorksheet('ข้อมูลทั้งหมด');
   buildDetailedSheet(wsDetail, result);
 
   const buf = await wb.xlsx.writeBuffer();
-  saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'output.xlsx');
+  const safeTitle = (result.reportTitle || 'สรุปผลการตาม')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .trim();
+  saveAs(
+    new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    `${safeTitle || 'สรุปผลการตาม'}.xlsx`
+  );
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -460,7 +503,11 @@ export const generateOneExcelFile = async (result: ProcessingResult): Promise<vo
 /**
  * Summary sheet layout styled like your image.
  */
-const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingResult) => {
+const buildSummarySheetLikeImage = (
+  ws: ExcelJS.Worksheet,
+  result: ProcessingResult,
+  performanceOnly = false
+) => {
   const C = {
     titleBg: 'FFB7CDE8',
     headerBg: 'FFB7CDE8',
@@ -473,9 +520,9 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     successBg: 'FFDDEBF7',
   };
 
-  // Title row
-  const title = ws.addRow(['ผลงานแรงรัดโทร']);
-  ws.mergeCells(1, 1, 1, 10);
+  const titleText = performanceOnly ? 'ผลการติดตามความสำเสร็จ' : result.reportTitle || 'ผลงานแรงรัดโทร';
+  const title = ws.addRow([titleText]);
+  ws.mergeCells(1, 1, 1, performanceOnly ? 7 : 10);
   title.height = 22;
   title.getCell(1).font = { bold: true, size: 14 };
   title.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
@@ -496,6 +543,74 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     { width: 12 },
   ];
 
+  if (performanceOnly) {
+    const secondaryHeader = ws.addRow([
+      'รหัสพนักงาน',
+      'ขาดการติดต่อ',
+      'งานที่ตามเองทั้งหมด',
+      'ทำได้',
+      '%ทำได้',
+      'ตามจ่ายไม่ได้',
+      '%ตามจ่ายไม่ได้',
+    ]);
+    secondaryHeader.height = 24;
+    for (let col = 1; col <= 7; col++) {
+      applyHeaderStyle(secondaryHeader.getCell(col), C.headerBg, C.headerFont);
+    }
+
+    const secondaryPercentCols = new Set([5, 7]);
+    const styleSecondaryRow = (r: ExcelJS.Row, isSubTotal = false) => {
+      for (let col = 1; col <= 7; col++) {
+        const cell = r.getCell(col);
+        cell.border = border();
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+
+        if (isSubTotal) {
+          cell.fill = fill(C.subtotalBg);
+          cell.font = { ...(cell.font ?? {}), bold: true };
+        } else {
+          if (col === 4 || col === 5) cell.fill = fill(C.orange);
+          if (col === 6 || col === 7) cell.fill = fill(C.gray);
+        }
+
+        if (secondaryPercentCols.has(col)) cell.numFmt = '0.00%';
+      }
+    };
+
+    for (const emp of result.employeeSummary) {
+      for (const b of emp.buckets) {
+        if (b.total === 0) continue;
+        const baseTotal = b.total - b.selfPaid;
+
+        const row = ws.addRow([
+          emp.employeeId,
+          b.bucket,
+          baseTotal,
+          b.callPaid,
+          pctNum(b.callPaid, baseTotal),
+          b.unpaid,
+          pctNum(b.unpaid, baseTotal),
+        ]);
+        styleSecondaryRow(row);
+      }
+
+      const empBaseTotal = emp.total - emp.selfPaid;
+      const subtotalRow = ws.addRow([
+        emp.employeeId,
+        'รวม',
+        empBaseTotal,
+        emp.callPaid,
+        pctNum(emp.callPaid, empBaseTotal),
+        emp.unpaid,
+        pctNum(emp.unpaid, empBaseTotal),
+      ]);
+      styleSecondaryRow(subtotalRow, true);
+    }
+
+    ws.views = [{ state: 'frozen', ySplit: 2 }];
+    return;
+  }
+
   // Header row
   const header = ws.addRow([
     'รหัสพนักงาน',
@@ -503,10 +618,10 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
     'งานที่ได้รับทั้งหมด',
     'ทำได้',
     '%ทำได้',
-    'มาเอง',
-    '%ลูกค้ามาเอง',
     'ไม่มาจ่าย',
     '%ลูกค้าไม่มาจ่าย',
+    'ลูกค้ามาจ่ายเอง',
+    '%ลูกค้ามาจ่ายเอง',
     '100.00%',
   ]);
   header.height = 26;
@@ -517,7 +632,7 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
   const styleRow = (r: ExcelJS.Row, isSubTotal = false, isGrand = false) => {
     r.eachCell((cell, col) => {
       cell.border = border();
-      cell.alignment = { vertical: 'middle', horizontal: col === 2 ? 'left' : 'center', wrapText: true };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
 
       if (isSubTotal) {
         cell.fill = fill(C.subtotalBg);
@@ -528,18 +643,13 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
       } else {
         // Column colors like image
         if (col === 4 || col === 5) cell.fill = fill(C.orange);
-        if (col === 6 || col === 7) cell.fill = fill(C.green);
-        if (col === 8 || col === 9) cell.fill = fill(C.gray);
+        if (col === 6 || col === 7) cell.fill = fill(C.gray);
+        if (col === 8 || col === 9) cell.fill = fill(C.green);
       }
 
       if (percentCols.has(col)) cell.numFmt = '0.00%';
     });
   };
-
-  let gtTotal = 0,
-    gtCall = 0,
-    gtSelf = 0,
-    gtUnpaid = 0;
 
   for (const emp of result.employeeSummary) {
     // bucket rows
@@ -552,10 +662,10 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
         b.total,
         b.callPaid,
         pctNum(b.callPaid, b.total),
-        b.selfPaid,
-        pctNum(b.selfPaid, b.total),
         b.unpaid,
         pctNum(b.unpaid, b.total),
+        b.selfPaid,
+        pctNum(b.selfPaid, b.total),
         1,
       ]);
       styleRow(r);
@@ -568,64 +678,14 @@ const buildSummarySheetLikeImage = (ws: ExcelJS.Worksheet, result: ProcessingRes
       emp.total,
       emp.callPaid,
       pctNum(emp.callPaid, emp.total),
-      emp.selfPaid,
-      pctNum(emp.selfPaid, emp.total),
       emp.unpaid,
       pctNum(emp.unpaid, emp.total),
+      emp.selfPaid,
+      pctNum(emp.selfPaid, emp.total),
       1,
     ]);
     styleRow(sub, true, false);
-
-    gtTotal += emp.total;
-    gtCall += emp.callPaid;
-    gtSelf += emp.selfPaid;
-    gtUnpaid += emp.unpaid;
   }
-
-  // Grand total
-  const grand = ws.addRow([
-    'Grand Total',
-    '',
-    gtTotal,
-    gtCall,
-    pctNum(gtCall, gtTotal),
-    gtSelf,
-    pctNum(gtSelf, gtTotal),
-    gtUnpaid,
-    pctNum(gtUnpaid, gtTotal),
-    1,
-  ]);
-  styleRow(grand, false, true);
-
-  // ✅ Success Rate row (ตามสูตรที่คุณให้)
-  const sr = result.summary.successRate / 100; // excel percent requires fraction
-  const successRow = ws.addRow([
-    'ผลงานความสำเร็จ',
-    '(ทำได้ / (งานทั้งหมด - มาเอง)) * 100',
-    '',
-    '',
-    sr,
-    '',
-    '',
-    '',
-    '',
-    '',
-  ]);
-
-  ws.mergeCells(successRow.number, 1, successRow.number, 4);
-  ws.mergeCells(successRow.number, 6, successRow.number, 10);
-
-  successRow.height = 22;
-  successRow.eachCell((cell, col) => {
-    cell.border = border();
-    cell.fill = fill(C.successBg);
-    cell.font = { ...(cell.font ?? {}), bold: true };
-    cell.alignment = { vertical: 'middle', horizontal: col === 1 ? 'left' : 'center', wrapText: true };
-  });
-
-  successRow.getCell(5).numFmt = '0.00%';
-  successRow.getCell(5).font = { bold: true, color: { argb: 'FF0B5394' }, size: 12 };
-  successRow.getCell(5).alignment = { horizontal: 'center', vertical: 'middle' };
 
   ws.views = [{ state: 'frozen', ySplit: 2 }];
 };

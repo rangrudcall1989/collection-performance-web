@@ -95,104 +95,126 @@ function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   return <span className="sort-icon active">{dir === "asc" ? "↑" : "↓"}</span>;
 }
 
+type SummaryRow = {
+  key: string;
+  employeeId: string;
+  bucket: string;
+  total: number;
+  done: number;
+  pctDone: number;
+  selfPaid: number;
+  pctSelf: number;
+  unpaid: number;
+  pctUnpaid: number;
+  isSubtotal: boolean;
+  isGrand: boolean;
+};
+
+type PerformanceRow = {
+  key: string;
+  employeeId: string;
+  bucket: string;
+  baseTotal: number;
+  done: number;
+  pctDone: number;
+  unpaid: number;
+  pctUnpaid: number;
+  isSubtotal: boolean;
+  isGrand: boolean;
+};
+
+function buildSummaryRows(result: ProcessingResult): SummaryRow[] {
+  const out: SummaryRow[] = [];
+
+  for (const emp of result.employeeSummary) {
+    for (const b of emp.buckets) {
+      if (b.total === 0) continue;
+
+      out.push({
+        key: `${emp.employeeId}-${b.bucket}`,
+        employeeId: emp.employeeId,
+        bucket: b.bucket,
+        total: b.total,
+        done: b.callPaid,
+        pctDone: b.total ? b.callPaid / b.total : 0,
+        selfPaid: b.selfPaid,
+        pctSelf: b.total ? b.selfPaid / b.total : 0,
+        unpaid: b.unpaid,
+        pctUnpaid: b.total ? b.unpaid / b.total : 0,
+        isSubtotal: false,
+        isGrand: false,
+      });
+    }
+
+    out.push({
+      key: `${emp.employeeId}-subtotal`,
+      employeeId: emp.employeeId,
+      bucket: "รวม",
+      total: emp.total,
+      done: emp.callPaid,
+      pctDone: emp.total ? emp.callPaid / emp.total : 0,
+      selfPaid: emp.selfPaid,
+      pctSelf: emp.total ? emp.selfPaid / emp.total : 0,
+      unpaid: emp.unpaid,
+      pctUnpaid: emp.total ? emp.unpaid / emp.total : 0,
+      isSubtotal: true,
+      isGrand: false,
+    });
+  }
+
+  return out;
+}
+
+function buildPerformanceRows(result: ProcessingResult): PerformanceRow[] {
+  const out: PerformanceRow[] = [];
+
+  for (const emp of result.employeeSummary) {
+    for (const b of emp.buckets) {
+      if (b.total === 0) continue;
+      const baseTotal = b.total - b.selfPaid;
+
+      out.push({
+        key: `${emp.employeeId}-${b.bucket}-performance`,
+        employeeId: emp.employeeId,
+        bucket: b.bucket,
+        baseTotal,
+        done: b.callPaid,
+        pctDone: baseTotal ? b.callPaid / baseTotal : 0,
+        unpaid: b.unpaid,
+        pctUnpaid: baseTotal ? b.unpaid / baseTotal : 0,
+        isSubtotal: false,
+        isGrand: false,
+      });
+    }
+
+    const baseTotal = emp.total - emp.selfPaid;
+    out.push({
+      key: `${emp.employeeId}-subtotal-performance`,
+      employeeId: emp.employeeId,
+      bucket: "รวม",
+      baseTotal,
+      done: emp.callPaid,
+      pctDone: baseTotal ? emp.callPaid / baseTotal : 0,
+      unpaid: emp.unpaid,
+      pctUnpaid: baseTotal ? emp.unpaid / baseTotal : 0,
+      isSubtotal: true,
+      isGrand: false,
+    });
+  }
+
+  return out;
+}
+
 // ─── Summary Table (HTML table จริง) ───────────────────────────────────────────
 
 function SummaryReportTable({ result }: { result: ProcessingResult }) {
-  const rows = useMemo(() => {
-    const out: Array<{
-      key: string;
-      employeeId: string;
-      bucket: string;
-      total: number;
-      done: number;
-      pctDone: number;
-      selfPaid: number;
-      pctSelf: number;
-      unpaid: number;
-      pctUnpaid: number;
-      isSubtotal: boolean;
-      isGrand: boolean;
-    }> = [];
-
-    let gtTotal = 0,
-      gtDone = 0,
-      gtSelf = 0,
-      gtUnpaid = 0;
-
-    for (const emp of result.employeeSummary) {
-      for (const b of emp.buckets) {
-        if (b.total === 0) continue;
-
-        const done = b.callPaid; // "ทำได้" ในรูป = โทรตามมาจ่าย
-        out.push({
-          key: `${emp.employeeId}-${b.bucket}`,
-          employeeId: emp.employeeId,
-          bucket: b.bucket,
-          total: b.total,
-          done,
-          pctDone: b.total ? done / b.total : 0,
-          selfPaid: b.selfPaid,
-          pctSelf: b.total ? b.selfPaid / b.total : 0,
-          unpaid: b.unpaid,
-          pctUnpaid: b.total ? b.unpaid / b.total : 0,
-          isSubtotal: false,
-          isGrand: false,
-        });
-      }
-
-      // subtotal
-      const empDone = emp.callPaid;
-      out.push({
-        key: `${emp.employeeId}-subtotal`,
-        employeeId: emp.employeeId,
-        bucket: "รวม",
-        total: emp.total,
-        done: empDone,
-        pctDone: emp.total ? empDone / emp.total : 0,
-        selfPaid: emp.selfPaid,
-        pctSelf: emp.total ? emp.selfPaid / emp.total : 0,
-        unpaid: emp.unpaid,
-        pctUnpaid: emp.total ? emp.unpaid / emp.total : 0,
-        isSubtotal: true,
-        isGrand: false,
-      });
-
-      gtTotal += emp.total;
-      gtDone += empDone;
-      gtSelf += emp.selfPaid;
-      gtUnpaid += emp.unpaid;
-    }
-
-    // grand total
-    out.push({
-      key: `grand-total`,
-      employeeId: "Grand Total",
-      bucket: "",
-      total: gtTotal,
-      done: gtDone,
-      pctDone: gtTotal ? gtDone / gtTotal : 0,
-      selfPaid: gtSelf,
-      pctSelf: gtTotal ? gtSelf / gtTotal : 0,
-      unpaid: gtUnpaid,
-      pctUnpaid: gtTotal ? gtUnpaid / gtTotal : 0,
-      isSubtotal: false,
-      isGrand: true,
-    });
-
-    return out;
-  }, [result]);
-
-  const successRate =
-    result.summary.callPaid === 0
-      ? 0
-      : (result.summary.callPaid /
-          (result.summary.total - result.summary.selfPaid)) *
-        100;
+  const rows = useMemo(() => buildSummaryRows(result), [result]);
+  const performanceRows = useMemo(() => buildPerformanceRows(result), [result]);
 
   return (
     <div className="report-wrap">
       <div className="report-title">
-        <div className="report-title-main">ผลงานแรงรัดโทร</div>
+        <div className="report-title-main">{result.reportTitle}</div>
       </div>
       <div className="report-table-scroll">
         <table className="report-table">
@@ -212,10 +234,10 @@ function SummaryReportTable({ result }: { result: ProcessingResult }) {
                 ทำได้
               </th>
               <th colSpan={2} className="th-sticky group self">
-                มาเอง
+                ไม่จ่าย
               </th>
               <th colSpan={2} className="th-sticky group unpaid">
-                ไม่จ่าย
+                ลูกค้ามาจ่ายเอง
               </th>
 
               <th rowSpan={2} className="th-sticky center">
@@ -243,29 +265,29 @@ function SummaryReportTable({ result }: { result: ProcessingResult }) {
                   r.isSubtotal ? "row-subtotal" : "",
                 ].join(" ")}
               >
-                <td className="cell left mono">{r.employeeId || "-"}</td>
-                <td className="cell">{r.bucket}</td>
-                <td className="cell right mono">{r.total.toLocaleString()}</td>
+                <td className="cell center mono">{r.employeeId || "-"}</td>
+                <td className="cell center">{r.bucket}</td>
+                <td className="cell center mono">{r.total.toLocaleString()}</td>
 
-                <td className="cell right mono col-done">
+                <td className="cell center mono col-done">
                   {r.done.toLocaleString()}
                 </td>
-                <td className="cell right mono col-done">
+                <td className="cell center mono col-done">
                   {(r.pctDone * 100).toFixed(2)}%
                 </td>
 
-                <td className="cell right mono col-self">
-                  {r.selfPaid.toLocaleString()}
-                </td>
-                <td className="cell right mono col-self">
-                  {(r.pctSelf * 100).toFixed(2)}%
-                </td>
-
-                <td className="cell right mono col-unpaid">
+                <td className="cell center mono col-unpaid">
                   {r.unpaid.toLocaleString()}
                 </td>
-                <td className="cell right mono col-unpaid">
+                <td className="cell center mono col-unpaid">
                   {(r.pctUnpaid * 100).toFixed(2)}%
+                </td>
+
+                <td className="cell center mono col-self">
+                  {r.selfPaid.toLocaleString()}
+                </td>
+                <td className="cell center mono col-self">
+                  {(r.pctSelf * 100).toFixed(2)}%
                 </td>
 
                 <td className="cell center mono">100.00%</td>
@@ -274,10 +296,67 @@ function SummaryReportTable({ result }: { result: ProcessingResult }) {
           </tbody>
         </table>
       </div>
-      <div className="report-title">
-        <div className="report-title-main">
-          ผลงานความสำเร็จ {successRate.toFixed(2) ?? 0}%
-        </div>
+
+      <div className="report-title report-title-secondary">
+        <div className="report-title-main">ผลการติดตามความสำเสร็จ</div>
+      </div>
+      <div className="report-table-scroll report-table-scroll-secondary">
+        <table className="report-table report-table-secondary">
+          <thead>
+            <tr>
+              <th rowSpan={2} className="th-sticky left">
+                รหัสพนักงาน
+              </th>
+              <th rowSpan={2} className="th-sticky">
+                ช่วงขาดการติดต่อ
+              </th>
+              <th rowSpan={2} className="th-sticky center">
+                งานที่ตามเองทั้งหมด
+              </th>
+              <th colSpan={2} className="th-sticky group done">
+                ทำได้
+              </th>
+              <th colSpan={2} className="th-sticky group self">
+                ตามจ่ายไม่ได้
+              </th>
+            </tr>
+            <tr>
+              <th className="th-sticky center done">จำนวน</th>
+              <th className="th-sticky center done">%</th>
+              <th className="th-sticky center self">จำนวน</th>
+              <th className="th-sticky center self">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {performanceRows.map((r) => (
+              <tr
+                key={r.key}
+                className={[
+                  r.isGrand ? "row-grand" : "",
+                  r.isSubtotal ? "row-subtotal" : "",
+                ].join(" ")}
+              >
+                <td className="cell center mono">{r.employeeId || "-"}</td>
+                <td className="cell center">{r.bucket}</td>
+                <td className="cell center mono">
+                  {r.baseTotal.toLocaleString()}
+                </td>
+                <td className="cell center mono col-done">
+                  {r.done.toLocaleString()}
+                </td>
+                <td className="cell center mono col-done">
+                  {(r.pctDone * 100).toFixed(2)}%
+                </td>
+                <td className="cell center mono col-unpaid">
+                  {r.unpaid.toLocaleString()}
+                </td>
+                <td className="cell center mono col-unpaid">
+                  {(r.pctUnpaid * 100).toFixed(2)}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -371,16 +450,6 @@ export default function Home() {
   }, [result]);
 
   // ── Derived data ────────────────────────────────────────────────────────────
-
-  const employeeIds = useMemo(() => {
-    if (!result) return [];
-    return [
-      "ALL",
-      ...Array.from(
-        new Set(result.records.map((r) => r.employeeId).filter(Boolean)),
-      ).sort(),
-    ];
-  }, [result]);
 
   const filteredSorted = useMemo(() => {
     if (!result) return [];
@@ -514,7 +583,7 @@ export default function Home() {
                   >
                     {isDownloading
                       ? "⏳ กำลังสร้างไฟล์…"
-                      : "⬇ ดาวน์โหลด output.xlsx (2 Sheets)"}
+                      : `⬇ ดาวน์โหลด ${result.reportTitle}.xlsx (3 Sheets)`}
                   </button>
                 </div>
               </div>
