@@ -101,6 +101,7 @@ const ALIAS = {
   // Export file
   EXPORT_CONTRACT_NO: ['เลขที่สัญญา', 'เลขทีสัญญา', 'เลขสัญญา'],
   NET_RECEIVED: ['ยอดรับสุทธิ', 'ยอดรับสุทธิ(บาท)', 'ยอดรับสุทธิ (บาท)', 'net_received', 'netReceived'],
+  EXPORT_EMPLOYEE_ID: ['พนง.เก็บเงิน'],
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -325,6 +326,10 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
     raw: true, // IMPORTANT
   });
 
+  const exportEmployeeId = firstNonEmpty(
+    ...exportRows.map((row) => getByAliases(row, ALIAS.EXPORT_EMPLOYEE_ID))
+  );
+
   // 3) ExportMap: contractNo -> totalPaidAmount (use "ยอดรับสุทธิ" only)
   const exportMap = new Map<string, number>();
 
@@ -407,7 +412,7 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
 
     records.push({
       index: pick(ALIAS.INDEX),
-      employeeId: pick(ALIAS.EMPLOYEE_ID) || fallbackEmployeeName,
+      employeeId: exportEmployeeId || pick(ALIAS.EMPLOYEE_ID) || fallbackEmployeeName,
       branch: pick(ALIAS.BRANCH),
       saleDate: formatDate(pick(ALIAS.SALE_DATE)),
       overdueDays,
