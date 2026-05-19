@@ -49,6 +49,7 @@ export interface CollectionRecord {
 
   totalPaidAmount: number; // from export "ยอดรับสุทธิ"
   status: 'SELF_PAID' | 'CALL_PAID' | 'UNPAID';
+  round: number; // ตามรอบที่ (1 = default when empty)
 }
 
 export interface BucketStat {
@@ -209,6 +210,16 @@ const getByAliases = (row: Record<string, unknown>, keys: string[]) => {
   return undefined;
 };
 
+const extractRound = (rows: Record<string, unknown>[]): number => {
+  for (const row of rows) {
+    for (const val of Object.values(row)) {
+      const m = String(val ?? '').trim().match(/ตามรอบที่\s*(\d+)/);
+      if (m) return parseInt(m[1], 10);
+    }
+  }
+  return 1;
+};
+
 const cleanTitleCell = (value: unknown): string =>
   String(value ?? '')
     .replace(/\s+/g, ' ')
@@ -293,6 +304,17 @@ const buildEmployeeSummary = (records: CollectionRecord[]): EmployeeSummary[] =>
   }
 
   return out.sort((a, b) => a.employeeId.localeCompare(b.employeeId, 'th'));
+};
+
+const filterResultByRound = (result: ProcessingResult, round: number): ProcessingResult => {
+  const records = result.records.filter((r) => r.round === round);
+  const employeeSummary = buildEmployeeSummary(records);
+  const total = records.length;
+  const selfPaid = records.filter((r) => r.status === 'SELF_PAID').length;
+  const callPaid = records.filter((r) => r.status === 'CALL_PAID').length;
+  const unpaid = records.filter((r) => r.status === 'UNPAID').length;
+  const successRate = callPaid === 0 ? 0 : (callPaid / (total - selfPaid)) * 100;
+  return { ...result, records, employeeSummary, summary: { total, selfPaid, callPaid, unpaid, successRate } };
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -422,6 +444,7 @@ export const processExcelData = (collectionBuffer: ArrayBuffer, exportBuffer: Ar
       fullName: pick(ALIAS.FULL_NAME),
       totalPaidAmount,
       status,
+      round: extractRound(rows),
     });
   }
 
@@ -482,11 +505,19 @@ export const generateOneExcelFile = async (result: ProcessingResult): Promise<vo
   wb.creator = 'Collection Dashboard';
   wb.created = new Date();
 
-  const wsSummary = wb.addWorksheet('สรุปผล');
-  buildSummarySheetLikeImage(wsSummary, result, false);
+  const rounds = [...new Set(result.records.map((r) => r.round))].sort((a, b) => a - b);
 
-  const wsPerformance = wb.addWorksheet('ผลการติดตามความสำเสร็จ');
-  buildSummarySheetLikeImage(wsPerformance, result, true);
+  const wsSummary = wb.addWorksheet('สรุปผล');
+  rounds.forEach((round, i) => {
+    buildSummarySheetSection(wsSummary, filterResultByRound(result, round), false, round, i === 0);
+  });
+  wsSummary.views = [{ state: 'frozen', ySplit: 2 }];
+
+  const wsPerformance = wb.addWorksheet('ผลการติดตามความสำเร็จ');
+  rounds.forEach((round, i) => {
+    buildSummarySheetSection(wsPerformance, filterResultByRound(result, round), true, round, i === 0);
+  });
+  wsPerformance.views = [{ state: 'frozen', ySplit: 2 }];
 
   const wsDetail = wb.addWorksheet('ข้อมูลทั้งหมด');
   buildDetailedSheet(wsDetail, result);
@@ -505,13 +536,12 @@ export const generateOneExcelFile = async (result: ProcessingResult): Promise<vo
 // Sheet builders
 // ───────────────────────────────────────────────────────────────────────────────
 
-/**
- * Summary sheet layout styled like your image.
- */
-const buildSummarySheetLikeImage = (
+const buildSummarySheetSection = (
   ws: ExcelJS.Worksheet,
   result: ProcessingResult,
-  performanceOnly = false
+  performanceOnly: boolean,
+  round: number,
+  isFirst: boolean
 ) => {
   const C = {
     titleBg: 'FFB7CDE8',
@@ -522,31 +552,39 @@ const buildSummarySheetLikeImage = (
     gray: 'FFD9D9D9',
     subtotalBg: 'FF92D050',
     grandBg: 'FFE7E6E6',
-    successBg: 'FFDDEBF7',
   };
 
-  const titleText = performanceOnly ? 'ผลการติดตามความสำเสร็จ' : result.reportTitle || 'ผลงานแรงรัดโทร';
-  const title = ws.addRow([titleText]);
-  ws.mergeCells(1, 1, 1, performanceOnly ? 7 : 10);
-  title.height = 22;
-  title.getCell(1).font = { bold: true, size: 14 };
-  title.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
-  title.getCell(1).fill = fill(C.titleBg);
-  title.getCell(1).border = border();
+  const colCount = performanceOnly ? 7 : 10;
 
-  // Column widths
-  ws.columns = [
-    { width: 16 },
-    { width: 18 },
-    { width: 18 },
-    { width: 10 },
-    { width: 12 },
-    { width: 10 },
-    { width: 16 },
-    { width: 12 },
-    { width: 18 },
-    { width: 12 },
-  ];
+  if (!isFirst) ws.addRow([]); // blank spacer between sections
+
+  const titleText = performanceOnly
+    ? `ผลการติดตามความสำเร็จ รอบที่ ${round}`
+    : `${result.reportTitle || 'ผลงานแรงรัดโทร'} รอบที่ ${round}`;
+
+  const titleRow = ws.addRow([titleText]);
+  const titleRowNum = ws.rowCount;
+  ws.mergeCells(titleRowNum, 1, titleRowNum, colCount);
+  titleRow.height = 22;
+  titleRow.getCell(1).font = { bold: true, size: 14 };
+  titleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+  titleRow.getCell(1).fill = fill(C.titleBg);
+  titleRow.getCell(1).border = border();
+
+  if (isFirst) {
+    ws.columns = [
+      { width: 16 },
+      { width: 18 },
+      { width: 18 },
+      { width: 10 },
+      { width: 12 },
+      { width: 10 },
+      { width: 16 },
+      { width: 12 },
+      { width: 18 },
+      { width: 12 },
+    ];
+  }
 
   if (performanceOnly) {
     const secondaryHeader = ws.addRow([
@@ -569,7 +607,6 @@ const buildSummarySheetLikeImage = (
         const cell = r.getCell(col);
         cell.border = border();
         cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-
         if (isSubTotal) {
           cell.fill = fill(C.subtotalBg);
           cell.font = { ...(cell.font ?? {}), bold: true };
@@ -577,7 +614,6 @@ const buildSummarySheetLikeImage = (
           if (col === 4 || col === 5) cell.fill = fill(C.orange);
           if (col === 6 || col === 7) cell.fill = fill(C.gray);
         }
-
         if (secondaryPercentCols.has(col)) cell.numFmt = '0.00%';
       }
     };
@@ -586,7 +622,6 @@ const buildSummarySheetLikeImage = (
       for (const b of emp.buckets) {
         if (b.total === 0) continue;
         const baseTotal = b.total - b.selfPaid;
-
         const row = ws.addRow([
           emp.employeeId,
           b.bucket,
@@ -611,12 +646,9 @@ const buildSummarySheetLikeImage = (
       ]);
       styleSecondaryRow(subtotalRow, true);
     }
-
-    ws.views = [{ state: 'frozen', ySplit: 2 }];
     return;
   }
 
-  // Header row
   const header = ws.addRow([
     'รหัสพนักงาน',
     'ขาดการติดต่อ',
@@ -638,7 +670,6 @@ const buildSummarySheetLikeImage = (
     r.eachCell((cell, col) => {
       cell.border = border();
       cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-
       if (isSubTotal) {
         cell.fill = fill(C.subtotalBg);
         cell.font = { ...(cell.font ?? {}), bold: true };
@@ -646,21 +677,17 @@ const buildSummarySheetLikeImage = (
         cell.fill = fill(C.grandBg);
         cell.font = { ...(cell.font ?? {}), bold: true };
       } else {
-        // Column colors like image
         if (col === 4 || col === 5) cell.fill = fill(C.orange);
         if (col === 6 || col === 7) cell.fill = fill(C.gray);
         if (col === 8 || col === 9) cell.fill = fill(C.green);
       }
-
       if (percentCols.has(col)) cell.numFmt = '0.00%';
     });
   };
 
   for (const emp of result.employeeSummary) {
-    // bucket rows
     for (const b of emp.buckets) {
       if (b.total === 0) continue;
-
       const r = ws.addRow([
         emp.employeeId,
         b.bucket,
@@ -676,7 +703,6 @@ const buildSummarySheetLikeImage = (
       styleRow(r);
     }
 
-    // subtotal
     const sub = ws.addRow([
       emp.employeeId,
       'รวม',
@@ -691,8 +717,6 @@ const buildSummarySheetLikeImage = (
     ]);
     styleRow(sub, true, false);
   }
-
-  ws.views = [{ state: 'frozen', ySplit: 2 }];
 };
 
 const buildDetailedSheet = (ws: ExcelJS.Worksheet, result: ProcessingResult) => {
